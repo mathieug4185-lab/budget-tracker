@@ -50,6 +50,64 @@
       try { const s = localStorage.getItem('categories'); return s ? JSON.parse(s) : DEFAULT_CATEGORIES; } catch { return DEFAULT_CATEGORIES; }
     }
     async function saveCategories(cats) { localStorage.setItem('categories', JSON.stringify(cats)); }
+    async function getComptableEmail() {
+      try { return localStorage.getItem('comptable_email') || ''; } catch { return ''; }
+    }
+    async function saveComptableEmail(email) { localStorage.setItem('comptable_email', email || ''); }
+
+    async function shareWithComptable(expense, category, comptableEmail) {
+      if (!comptableEmail) {
+        alert("Configure d'abord l'email du comptable dans les Réglages.");
+        return;
+      }
+      const amountStr = formatEurFull(expense.amount);
+      const dateStr = new Date(expense.date).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
+      const catName = category ? category.name : 'Dépense';
+      const subject = 'Note de frais - ' + catName + ' - ' + dateStr;
+      const bodyLines = [
+        'Bonjour,',
+        '',
+        'Ci-joint la note de frais pour la dépense suivante :',
+        '',
+        '- Montant : ' + amountStr,
+        '- Catégorie : ' + catName,
+        '- Date : ' + dateStr,
+      ];
+      if (expense.description) bodyLines.push('- Description : ' + expense.description);
+      bodyLines.push('', 'Cordialement,', 'Mathieu');
+      const body = bodyLines.join('\n');
+
+      if (expense.hasPhoto && navigator.canShare && navigator.share) {
+        try {
+          const photoDataUrl = await getPhoto(expense.id);
+          if (photoDataUrl) {
+            const resp = await fetch(photoDataUrl);
+            const blob = await resp.blob();
+            const filename = 'justificatif-' + expense.date + '.jpg';
+            const file = new File([blob], filename, { type: 'image/jpeg' });
+            if (navigator.canShare({ files: [file] })) {
+              try {
+                await navigator.share({
+                  files: [file],
+                  title: subject,
+                  text: 'Destinataire : ' + comptableEmail + '\n\n' + body,
+                });
+                return;
+              } catch (err) {
+                if (err && err.name === 'AbortError') return;
+              }
+            }
+          }
+        } catch (err) {}
+      }
+      const mailto = 'mailto:' + encodeURIComponent(comptableEmail) + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
+      window.location.href = mailto;
+      if (expense.hasPhoto) {
+        setTimeout(function() {
+          alert("Le mail est ouvert avec les infos pré-remplies. Pense à joindre le justificatif photo depuis l'app Mail avant d'envoyer.");
+        }, 800);
+      }
+    }
     async function listAvailableMonths() {
       const months = [];
       for (let i = 0; i < localStorage.length; i++) {
@@ -207,11 +265,14 @@
       const [editingExpense, setEditingExpense] = useState(null);
       const [loading, setLoading] = useState(true);
       const [availableMonths, setAvailableMonths] = useState([]);
+      const [comptableEmail, setComptableEmail] = useState('');
 
       useEffect(function() {
         (async function() {
           const cats = await getCategories();
           setCategories(cats);
+          const cEmail = await getComptableEmail();
+          setComptableEmail(cEmail);
           const months = await listAvailableMonths();
           const thisMonth = ymKey(new Date());
           if (months.indexOf(thisMonth) < 0) months.unshift(thisMonth);
@@ -260,6 +321,7 @@
       };
 
       const handleSaveCategories = async function(cats) { await saveCategories(cats); setCategories(cats); };
+      const handleSaveComptableEmail = async function(email) { await saveComptableEmail(email); setComptableEmail(email); };
 
       if (loading) {
         return <div className="min-h-screen bg-stone-50 flex items-center justify-center"><div className="text-stone-400 text-sm">Chargement…</div></div>;
@@ -269,10 +331,10 @@
         <div className="min-h-screen bg-stone-50 pb-24">
           {view === 'dashboard' && <Dashboard categories={categories} expenses={expenses} currentMonth={currentMonth} setCurrentMonth={setCurrentMonth} availableMonths={availableMonths} onExpenseClick={setEditingExpense} />}
           {view === 'history' && <HistoryView categories={categories} currentMonth={currentMonth} setCurrentMonth={setCurrentMonth} availableMonths={availableMonths} expenses={expenses} onExpenseClick={setEditingExpense} />}
-          {view === 'settings' && <SettingsView categories={categories} onSave={handleSaveCategories} />}
+          {view === 'settings' && <SettingsView categories={categories} onSave={handleSaveCategories} comptableEmail={comptableEmail} onSaveComptableEmail={handleSaveComptableEmail} />}
           <BottomNav view={view} setView={setView} onAdd={function(){ setShowAdd(true); }} />
           {showAdd && <ExpenseForm categories={categories} onClose={function(){ setShowAdd(false); }} onSave={async function(exp, photo){ await handleSaveExpense(exp, photo); setShowAdd(false); }} />}
-          {editingExpense && <ExpenseDetail expense={editingExpense} categories={categories} onClose={function(){ setEditingExpense(null); }} onSave={async function(exp, photo){ await handleSaveExpense(exp, photo); setEditingExpense(null); }} onDelete={async function(exp){ await handleDeleteExpense(exp); setEditingExpense(null); }} />}
+          {editingExpense && <ExpenseDetail expense={editingExpense} categories={categories} comptableEmail={comptableEmail} onClose={function(){ setEditingExpense(null); }} onSave={async function(exp, photo){ await handleSaveExpense(exp, photo); setEditingExpense(null); }} onDelete={async function(exp){ await handleDeleteExpense(exp); setEditingExpense(null); }} />}
         </div>
       );
     }
@@ -381,7 +443,10 @@
                     <button key={e.id} onClick={function(){ onExpenseClick(e); }} className={'w-full px-4 py-3 flex items-center gap-3 text-left active:bg-stone-50 ' + (i < arr.length - 1 ? 'border-b border-stone-100' : '')}>
                       <div className="text-2xl flex-shrink-0">{cat ? cat.icon : '💰'}</div>
                       <div className="min-w-0 flex-1">
-                        <div className="font-medium text-stone-900 text-sm truncate">{e.description || (cat ? cat.name : 'Dépense')}</div>
+                        <div className="font-medium text-stone-900 text-sm truncate flex items-center gap-2">
+                          <span className="truncate">{e.description || (cat ? cat.name : 'Dépense')}</span>
+                          {e.isPro && <span className="px-1.5 py-0.5 bg-slate-900 text-white text-[9px] font-semibold rounded-full flex-shrink-0">PRO</span>}
+                        </div>
                         <div className="text-xs text-stone-500 mt-0.5">{dateLabel(e.date)} · {cat ? cat.name : ''}</div>
                       </div>
                       <div className="text-sm font-semibold text-stone-900">{formatEur(e.amount)}</div>
@@ -467,7 +532,10 @@
                           <button key={e.id} onClick={function(){ onExpenseClick(e); }} className={'w-full px-4 py-3 flex items-center gap-3 text-left active:bg-stone-50 ' + (i < items.length - 1 ? 'border-b border-stone-100' : '')}>
                             <div className="text-2xl flex-shrink-0">{cat ? cat.icon : '💰'}</div>
                             <div className="min-w-0 flex-1">
-                              <div className="font-medium text-stone-900 text-sm truncate">{e.description || (cat ? cat.name : 'Dépense')}</div>
+                              <div className="font-medium text-stone-900 text-sm truncate flex items-center gap-2">
+                                <span className="truncate">{e.description || (cat ? cat.name : 'Dépense')}</span>
+                                {e.isPro && <span className="px-1.5 py-0.5 bg-slate-900 text-white text-[9px] font-semibold rounded-full flex-shrink-0">PRO</span>}
+                              </div>
                               <div className="text-xs text-stone-500 mt-0.5 flex items-center gap-1">
                                 {cat ? cat.name : ''}
                                 {e.hasPhoto && <IconFileImage />}
@@ -490,8 +558,12 @@
     function SettingsView(props) {
       const categories = props.categories;
       const onSave = props.onSave;
+      const comptableEmail = props.comptableEmail;
+      const onSaveComptableEmail = props.onSaveComptableEmail;
       const [editing, setEditing] = useState(null);
       const [draftTarget, setDraftTarget] = useState('');
+      const [emailDraft, setEmailDraft] = useState(comptableEmail || '');
+      useEffect(function() { setEmailDraft(comptableEmail || ''); }, [comptableEmail]);
       const handleSave = async function() {
         const n = parseFloat(draftTarget);
         if (isNaN(n) || n < 0) return;
@@ -506,7 +578,14 @@
             <div className="px-5 pt-12 pb-4"><div className="text-lg font-semibold text-stone-900 tracking-tight">Paramètres</div></div>
           </div>
           <div className="px-5 pt-6">
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-3 px-1">Cibles mensuelles</h2>
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-3 px-1">Comptable</h2>
+            <div className="bg-white rounded-2xl px-4 py-3 shadow-sm border border-stone-100">
+              <div className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-1">Email du comptable</div>
+              <input type="email" inputMode="email" placeholder="comptable@exemple.fr" value={emailDraft} onChange={function(e){ setEmailDraft(e.target.value); }} onBlur={function(){ if (emailDraft !== comptableEmail) onSaveComptableEmail(emailDraft.trim()); }} className="w-full text-sm bg-transparent outline-none" />
+            </div>
+            <div className="text-xs text-stone-500 mt-2 px-1">Utilisé pour envoyer les notes de frais pro depuis l'app.</div>
+
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-3 px-1 mt-8">Cibles mensuelles</h2>
             <div className="bg-white rounded-2xl shadow-sm border border-stone-100 overflow-hidden">
               {categories.map(function(c, i) {
                 return <button key={c.id} onClick={function(){ setEditing(c); setDraftTarget(String(c.target)); }} className={'w-full px-4 py-3 flex items-center gap-3 text-left active:bg-stone-50 ' + (i < categories.length - 1 ? 'border-b border-stone-100' : '')}>
@@ -549,6 +628,7 @@
       const [categoryId, setCategoryId] = useState(initial ? initial.categoryId : null);
       const [date, setDate] = useState(initial ? initial.date : new Date().toISOString().slice(0, 10));
       const [description, setDescription] = useState(initial ? initial.description : '');
+      const [isPro, setIsPro] = useState(initial && initial.isPro ? true : false);
       const [photoData, setPhotoData] = useState(null);
       const [photoPreview, setPhotoPreview] = useState(null);
       const [saving, setSaving] = useState(false);
@@ -572,6 +652,7 @@
             {
               amount: amt, categoryId: categoryId, date: date, description: description.trim(),
               hasPhoto: !!(photoData || (initial && initial.hasPhoto)),
+              isPro: isPro,
               createdAt: initial && initial.createdAt ? initial.createdAt : new Date().toISOString(),
             }
           );
@@ -594,6 +675,14 @@
                   <input type="text" inputMode="decimal" placeholder="0" value={amount} onChange={function(e){ setAmount(e.target.value.replace(',', '.')); setError(null); }} className="text-4xl font-semibold tracking-tight bg-transparent outline-none flex-1 min-w-0" autoFocus />
                   <span className="text-3xl text-stone-400 font-light">€</span>
                 </div>
+              </div>
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-2 px-1">Type</div>
+                <div className="bg-stone-200 p-1 rounded-2xl flex">
+                  <button onClick={function(){ setIsPro(false); }} className={'flex-1 py-2.5 rounded-xl text-sm font-medium transition-colors ' + (!isPro ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-600')}>Perso</button>
+                  <button onClick={function(){ setIsPro(true); }} className={'flex-1 py-2.5 rounded-xl text-sm font-medium transition-colors ' + (isPro ? 'bg-slate-900 text-white shadow-sm' : 'text-stone-600')}>Pro</button>
+                </div>
+                {isPro && <div className="text-xs text-stone-500 mt-2 px-1">Après enregistrement, tu pourras envoyer le justificatif au comptable en 1 tap.</div>}
               </div>
               <div>
                 <div className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-2 px-1">Catégorie</div>
@@ -639,6 +728,7 @@
     function ExpenseDetail(props) {
       const expense = props.expense;
       const categories = props.categories;
+      const comptableEmail = props.comptableEmail;
       const onClose = props.onClose;
       const onSave = props.onSave;
       const onDelete = props.onDelete;
@@ -647,6 +737,7 @@
       const [confirmDelete, setConfirmDelete] = useState(false);
       const cat = categories.find(function(c) { return c.id === expense.categoryId; });
       useEffect(function() { if (expense.hasPhoto) getPhoto(expense.id).then(setPhotoUrl); }, [expense]);
+      const handleSend = function() { shareWithComptable(expense, cat, comptableEmail); };
       if (editing) {
         return <ExpenseForm categories={categories} initial={expense} onClose={function(){ setEditing(false); }} onSave={async function(e, p){ await onSave(e, p); setEditing(false); }} />;
       }
@@ -662,8 +753,16 @@
               <div className="text-center">
                 <div className="text-5xl mb-3">{cat ? cat.icon : '💰'}</div>
                 <div className="text-4xl font-semibold tracking-tight text-stone-900">{formatEurFull(expense.amount)}</div>
-                <div className="text-stone-500 text-sm mt-1">{cat ? cat.name : ''}</div>
+                <div className="text-stone-500 text-sm mt-1 flex items-center justify-center gap-2">
+                  <span>{cat ? cat.name : ''}</span>
+                  {expense.isPro && <span className="px-2 py-0.5 bg-slate-900 text-white text-xs font-semibold rounded-full">PRO</span>}
+                </div>
               </div>
+              {expense.isPro && (
+                <button onClick={handleSend} className="mt-6 w-full py-3 bg-slate-900 text-white rounded-2xl font-medium text-sm flex items-center justify-center gap-2 shadow-sm">
+                  Envoyer au comptable
+                </button>
+              )}
               <div className="mt-8 bg-white rounded-2xl shadow-sm border border-stone-100 divide-y divide-stone-100">
                 <div className="px-4 py-3 flex justify-between text-sm">
                   <span className="text-stone-500">Date</span>
