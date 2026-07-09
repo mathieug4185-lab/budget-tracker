@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Budget" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>Budget</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { -webkit-tap-highlight-color: transparent; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif; overscroll-behavior-y: none; -webkit-user-select: none; user-select: none; }
+    input, textarea { -webkit-user-select: text; user-select: text; }
+    html { -webkit-text-size-adjust: 100%; }
+  </style>
+</head>
+<body class="bg-stone-50">
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useRef } = React;
+
+    // === DEFAULT CATEGORIES ===
+    const DEFAULT_CATEGORIES = [
+      { id: 'logement', name: 'Logement', target: 2300, icon: '🏠' },
+      { id: 'aide_domicile', name: 'Aide à domicile', target: 600, icon: '🧹' },
+      { id: 'courses_livraison', name: 'Courses & livraison', target: 1200, icon: '🛒' },
+      { id: 'restos', name: 'Restaurants', target: 700, icon: '🍽️' },
+      { id: 'mode', name: 'Mode / shopping', target: 1500, icon: '👔' },
+      { id: 'voyages', name: 'Voyages / hôtels', target: 1200, icon: '✈️' },
+      { id: 'transport', name: 'Transport', target: 400, icon: '🚇' },
+      { id: 'beaute_sante', name: 'Beauté / santé', target: 400, icon: '💊' },
+      { id: 'culture', name: 'Sorties culture', target: 350, icon: '🎭' },
+      { id: 'assurances', name: 'Assurances', target: 300, icon: '🛡️' },
+      { id: 'abonnements', name: 'Abonnements & télécom', target: 200, icon: '📱' },
+      { id: 'maison_deco', name: 'Maison / déco', target: 250, icon: '🪑' },
+      { id: 'cash_divers', name: 'Cash & divers', target: 400, icon: '💵' },
+      { id: 'frais_bancaires', name: 'Frais bancaires', target: 50, icon: '🏦' },
+    ];
+
+    // === STORAGE (localStorage for data, IndexedDB for photos) ===
+    async function getMonthExpenses(ym) {
+      try { const s = localStorage.getItem('month:' + ym); return s ? JSON.parse(s) : []; } catch { return []; }
+    }
+    async function saveMonthExpenses(ym, expenses) {
+      localStorage.setItem('month:' + ym, JSON.stringify(expenses));
+    }
+    async function getCategories() {
+      try { const s = localStorage.getItem('categories'); return s ? JSON.parse(s) : DEFAULT_CATEGORIES; } catch { return DEFAULT_CATEGORIES; }
+    }
+    async function saveCategories(cats) {
+      localStorage.setItem('categories', JSON.stringify(cats));
+    }
+    async function listAvailableMonths() {
+      const months = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith('month:')) months.push(key.replace('month:', ''));
+      }
+      return months.sort().reverse();
+    }
+
+    // IndexedDB for photos
+    let dbPromise = null;
+    function getDB() {
+      if (!dbPromise) {
+        dbPromise = new Promise((resolve, reject) => {
+          const req = indexedDB.open('budget-tracker', 1);
+          req.onupgradeneeded = () => { req.result.createObjectStore('photos'); };
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+      }
+      return dbPromise;
+    }
+    async function getPhoto(id) {
+      try {
+        const db = await getDB();
+        return new Promise(resolve => {
+          const tx = db.transaction('photos', 'readonly');
+          const req = tx.objectStore('photos').get(id);
+          req.onsuccess = () => resolve(req.result || null);
+          req.onerror = () => resolve(null);
+        });
+      } catch { return null; }
+    }
+    async function savePhoto(id, base64) {
+      try {
+        const db = await getDB();
+        return new Promise(resolve => {
+          const tx = db.transaction('photos', 'readwrite');
+          tx.objectStore('photos').put(base64, id);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+        });
+      } catch {}
+    }
+    async function deletePhotoFromStorage(id) {
+      try {
+        const db = await getDB();
+        return new Promise(resolve => {
+          const tx = db.transaction('photos', 'readwrite');
+          tx.objectStore('photos').delete(id);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+        });
+      } catch {}
+    }
+
+    // === IMAGE COMPRESSION ===
+    async function compressImage(file, maxWidth = 1400, quality = 0.7) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const img = new Image();
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            let { width, height } = img;
+            if (width > maxWidth) { height = Math.round((height * maxWidth) / width); width = maxWidth; }
+            canvas.width = width; canvas.height = height;
+            canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+            resolve(canvas.toDataURL('image/jpeg', quality));
+          };
+          img.onerror = reject;
+          img.src = e.target.result;
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    // === UTILS ===
+    const formatEur = (n) => new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(n);
+    const formatEurFull = (n) => new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' }).format(n);
+    const ymKey = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+    const ymLabel = (ym) => {
+      const [y, m] = ym.split('-');
+      const months = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+      return months[parseInt(m) - 1] + ' ' + y;
+    };
+    const dateLabel = (iso) => new Date(iso).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
+    const generateId = () => Date.now() + '-' + Math.random().toString(36).slice(2, 9);
+    const daysInMonth = (ym) => { const [y, m] = ym.split('-').map(Number); return new Date(y, m, 0).getDate(); };
+    const isCurrentMonth = (ym) => ym === ymKey(new Date());
+    const isPastMonth = (ym) => ym < ymKey(new Date());
+    const monthProgress = (ym) => {
+      if (isPastMonth(ym)) return 1;
+      if (!isCurrentMonth(ym)) return 0;
+      return new Date().getDate() / daysInMonth(ym);
+    };
+    const currentDayOfMonth = () => new Date().getDate();
+
+    // === ICONS (inline SVG) ===
+    const Icon = ({ path, className = 'w-5 h-5' }) => (
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+        <g dangerouslySetInnerHTML={{ __html: path }} />
+      </svg>
+    );
+    const IconPlus = (p) => <Icon path='<path d="M12 5v14"/><path d="M5 12h14"/>' {...p} />;
+    const IconChart = (p) => <Icon path='<path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>' {...p} />;
+    const IconHistory = (p) => <Icon path='<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>' {...p} />;
+    const IconSettings = (p) => <Icon path='<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>' {...p} />;
+    const IconCamera = (p) => <Icon path='<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/>' {...p} />;
+    const IconX = (p) => <Icon path='<path d="M18 6 6 18"/><path d="m6 6 12 12"/>' {...p} />;
+    const IconTrash = (p) => <Icon path='<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>' {...p} />;
+    const IconChevronLeft = (p) => <Icon path='<polyline points="15 18 9 12 15 6"/>' {...p} />;
+    const IconChevronRight = (p) => <Icon path='<polyline points="9 18 15 12 9 6"/>' {...p} />;
+    const IconEdit = (p) => <Icon path='<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>' {...p} />;
+    const IconFileImage = (p) => <Icon path='<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><circle cx="10" cy="12" r="2"/>' {...p} />;
+    const IconAlert = (p) => <Icon path='<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>' {...p} />;
+
+    // === MAIN APP ===
+    function App() {
+      const [view, setView] = useState('dashboard');
+      const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
+      const [expenses, setExpenses] = useState([]);
+      const [currentMonth, setCurrentMonth] = useState(ymKey(new Date()));
+      const [showAdd, setShowAdd] = useState(false);
+      const [editingExpense, setEditingExpense] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [availableMonths, setAvailableMonths] = useState([]);
+
+      useEffect(() => {
+        (async () => {
+          const cats = await getCategories();
+          setCategories(cats);
+          const months = await listAvailableMonths();
+          const thisMonth = ymKey(new Date());
+          if (!months.includes(thisMonth)) months.unshift(thisMonth);
+          setAvailableMonths(months);
+          const ex = await getMonthExpenses(currentMonth);
+          setExpenses(ex);
+          setLoading(false);
+        })();
+      }, []);
+
+      useEffect(() => {
+        if (loading) return;
+        (async () => {
+          const ex = await getMonthExpenses(currentMonth);
+          setExpenses(ex);
+        })();
+      }, [currentMonth]);
+
+      const handleSaveExpense = async (expense, photoData) => {
+        const ym = expense.date.slice(0, 7);
+        const existing = await getMonthExpenses(ym);
+        let newExpenses;
+        let savedId = expense.id;
+        if (expense.id) {
+          newExpenses = existing.map(e => e.id === expense.id ? expense : e);
+        } else {
+          savedId = generateId();
+          newExpenses = [...existing, { ...expense, id: savedId }];
+        }
+        await saveMonthExpenses(ym, newExpenses);
+        if (photoData) await savePhoto(savedId, photoData);
+        if (ym === currentMonth) setExpenses(newExpenses);
+        const months = await listAvailableMonths();
+        if (!months.includes(ymKey(new Date()))) months.unshift(ymKey(new Date()));
+        setAvailableMonths(months);
+      };
+
+      const handleDeleteExpense = async (expense) => {
+        const ym = expense.date.slice(0, 7);
+        const newExpenses = (await getMonthExpenses(ym)).filter(e => e.id !== expense.id);
+        await saveMonthExpenses(ym, newExpenses);
+        await deletePhotoFromStorage(expense.id);
+        if (ym === currentMonth) setExpenses(newExpenses);
+      };
+
+      const handleSaveCategories = async (cats) => { await saveCategories(cats); setCategories(cats); };
+
+      if (loading) {
+        return <div className="min-h-screen bg-stone-50 flex items-center justify-center"><div className="text-stone-400 text-sm">Chargement…</div></div>;
+      }
+
+      return (
+        <div className="min-h-screen bg-stone-50 pb-24">
+          {view === 'dashboard' && <Dashboard categories={categories} expenses={expenses} currentMonth={currentMonth} setCurrentMonth={setCurrentMonth} availableMonths={availableMonths} onExpenseClick={setEditingExpense} />}
+          {view === 'history' && <HistoryView categories={categories} currentMonth={currentMonth} setCurrentMonth={setCurrentMonth} availableMonths={availableMonths} expenses={expenses} onExpenseClick={setEditingExpense} />}
+          {view === 'settings' && <SettingsView categories={categories} onSave={handleSaveCategories} />}
+          <BottomNav view={view} setView={setView} onAdd={() => setShowAdd(true)} />
+          {showAdd && <ExpenseForm categories={categories} onClose={() => setShowAdd(false)} onSave={async (exp, photo) => { await handleSaveExpense(exp, photo); setShowAdd(false); }} />}
+          {editingExpense && <ExpenseDetail expense={editingExpense} categories={categories} onClose={() => setEditingExpense(null)} onSave={async (exp, photo) => { await handleSaveExpense(exp, photo); setEditingExpense(null); }} onDelete={async (exp) => { await handleDeleteExpense(exp); setEditingExpense(null); }} />}
+        </div>
+      );
+    }
+
+    // === DASHBOARD ===
+    function Dashboard({ categories, expenses, currentMonth, setCurrentMonth, availableMonths, onExpenseClick }) {
+      const totals = {};
+      categories.forEach(c => totals[c.id] = 0);
+      expenses.forEach(e => { if (totals[e.categoryId] !== undefined) totals[e.categoryId] += Number(e.amount); });
+      const totalSpent = Object.values(totals).reduce((a, b) => a + b, 0);
+      const totalTarget = categories.reduce((a, c) => a + c.target, 0);
+      const isCurrent = isCurrentMonth(currentMonth);
+      const progress = monthProgress(currentMonth);
+      const proratedTarget = totalTarget * progress;
+      const daysTotal = daysInMonth(currentMonth);
+      const dayNow = currentDayOfMonth();
+      const referenceTarget = isCurrent ? proratedTarget : totalTarget;
+      const isOver = totalSpent > referenceTarget;
+      const projection = isCurrent && progress > 0 ? totalSpent / progress : totalSpent;
+      const proRataMarker = isCurrent ? progress * 100 : null;
+      const fillPct = totalTarget > 0 ? Math.min((totalSpent / totalTarget) * 100, 100) : 0;
+
+      return (
+        <div>
+          <div className="bg-white border-b border-stone-200 sticky top-0 z-10">
+            <div className="px-5 pt-12 pb-4">
+              <MonthSelector currentMonth={currentMonth} setCurrentMonth={setCurrentMonth} availableMonths={availableMonths} />
+            </div>
+          </div>
+          <div className="px-5 pt-6">
+            <div className="bg-gradient-to-br from-slate-900 to-slate-700 rounded-3xl p-6 text-white shadow-lg">
+              <div className="flex items-start justify-between">
+                <div className="text-stone-300 text-sm font-medium tracking-wide uppercase">Dépensé {isCurrent ? 'ce mois' : 'sur ce mois'}</div>
+                {isCurrent && <div className="text-stone-400 text-xs font-medium tracking-wide">Jour {dayNow}/{daysTotal}</div>}
+              </div>
+              <div className="text-4xl font-semibold mt-2 tracking-tight">{formatEur(totalSpent)}</div>
+              <div className="flex items-center gap-2 mt-3 text-stone-300 text-sm flex-wrap">
+                <span>Cible {formatEur(totalTarget)}</span>
+                {isCurrent ? (
+                  <React.Fragment>
+                    <span className="text-stone-500">·</span>
+                    <span>prorata {formatEur(proratedTarget)}</span>
+                    <span className="text-stone-500">·</span>
+                    <span className={isOver ? 'text-rose-300' : 'text-emerald-300'}>{isOver ? '+' : ''}{formatEur(totalSpent - proratedTarget)}</span>
+                  </React.Fragment>
+                ) : (
+                  <React.Fragment>
+                    <span className="text-stone-500">·</span>
+                    <span className={isOver ? 'text-rose-300' : 'text-emerald-300'}>{isOver ? '+' : ''}{formatEur(totalSpent - totalTarget)}</span>
+                  </React.Fragment>
+                )}
+              </div>
+              <div className="mt-4 h-2 bg-slate-800 rounded-full overflow-hidden relative">
+                <div className={'h-full rounded-full transition-all duration-500 ' + (isOver ? 'bg-rose-400' : 'bg-emerald-400')} style={{ width: fillPct + '%' }} />
+                {proRataMarker !== null && proRataMarker < 100 && <div className="absolute top-0 bottom-0 w-0.5 bg-white/70" style={{ left: proRataMarker + '%' }} />}
+              </div>
+              {isCurrent && <div className="mt-3 text-stone-400 text-xs">Au rythme actuel · <span className="text-stone-200 font-medium">{formatEur(projection)}</span> en fin de mois</div>}
+            </div>
+          </div>
+          <div className="px-5 pt-6">
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-3 px-1">Par catégorie</h2>
+            <div className="space-y-2">
+              {categories.map(cat => {
+                const spent = totals[cat.id] || 0;
+                const catProrata = cat.target * progress;
+                const catRef = isCurrent ? catProrata : cat.target;
+                const catOver = spent > catRef;
+                const catOverFullTarget = spent > cat.target;
+                const pct = cat.target > 0 ? (spent / cat.target) * 100 : 0;
+                let barColor = 'bg-emerald-400'; let textColor = 'text-emerald-600';
+                if (catOverFullTarget) { barColor = 'bg-rose-400'; textColor = 'text-rose-600'; }
+                else if (isCurrent && catOver) { barColor = 'bg-amber-400'; textColor = 'text-amber-600'; }
+                return (
+                  <div key={cat.id} className="bg-white rounded-2xl p-4 shadow-sm border border-stone-100">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                        <div className="text-2xl flex-shrink-0">{cat.icon}</div>
+                        <div className="min-w-0 flex-1">
+                          <div className="font-medium text-stone-900 text-sm truncate">{cat.name}</div>
+                          <div className="text-xs text-stone-500 mt-0.5">{formatEur(spent)} <span className="text-stone-400">/ {formatEur(cat.target)}</span></div>
+                        </div>
+                      </div>
+                      <div className={'text-sm font-medium ' + (spent > 0 || catOver ? textColor : 'text-stone-400')}>
+                        {spent === 0 ? '–' : <span>{catOver ? '+' : ''}{formatEur(spent - catRef)}</span>}
+                      </div>
+                    </div>
+                    <div className="mt-3 h-1.5 bg-stone-100 rounded-full overflow-hidden relative">
+                      <div className={'h-full rounded-full transition-all duration-500 ' + barColor} style={{ width: Math.min(pct, 100) + '%' }} />
+                      {isCurrent && progress < 1 && <div className="absolute top-0 bottom-0 w-0.5 bg-stone-400" style={{ left: (progress * 100) + '%' }} />}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          {expenses.length > 0 && (
+            <div className="px-5 pt-8">
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-3 px-1">Dépenses récentes</h2>
+              <div className="bg-white rounded-2xl shadow-sm border border-stone-100 overflow-hidden">
+                {expenses.slice().sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5).map((e, i, arr) => {
+                  const cat = categories.find(c => c.id === e.categoryId);
+                  return (
+                    <button key={e.id} onClick={() => onExpenseClick(e)} className={'w-full px-4 py-3 flex items-center gap-3 text-left active:bg-stone-50 ' + (i < arr.length - 1 ? 'border-b border-stone-100' : '')}>
+                      <div className="text-2xl flex-shrink-0">{cat?.icon || '💰'}</div>
+                      <div className="min-w-0 flex-1">
+                        <div className="font-medium text-stone-900 text-sm truncate">{e.description || cat?.name || 'Dépense'}</div>
+                        <div className="text-xs text-stone-500 mt-0.5">{dateLabel(e.date)} · {cat?.name}</div>
+                      </div>
+                      <div className="text-sm font-semibold text-stone-900">{formatEur(e.amount)}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {expenses.length === 0 && (
+            <div className="px-5 pt-12 text-center">
+              <div className="text-stone-400 text-sm">Pas encore de dépense ce mois-ci.</div>
+              <div className="text-stone-400 text-xs mt-1">Touche le bouton + pour en ajouter une.</div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // === MONTH SELECTOR ===
+    function MonthSelector({ currentMonth, setCurrentMonth, availableMonths }) {
+      const idx = availableMonths.indexOf(currentMonth);
+      const canPrev = idx < availableMonths.length - 1;
+      const canNext = idx > 0;
+      return (
+        <div className="flex items-center justify-between">
+          <button onClick={() => canPrev && setCurrentMonth(availableMonths[idx + 1])} disabled={!canPrev} className={'p-2 -ml-2 rounded-full ' + (canPrev ? 'text-stone-700 active:bg-stone-100' : 'text-stone-300')}>
+            <IconChevronLeft />
+          </button>
+          <div className="text-lg font-semibold text-stone-900 tracking-tight">{ymLabel(currentMonth)}</div>
+          <button onClick={() => canNext && setCurrentMonth(availableMonths[idx - 1])} disabled={!canNext} className={'p-2 -mr-2 rounded-full ' + (canNext ? 'text-stone-700 active:bg-stone-100' : 'text-stone-300')}>
+            <IconChevronRight />
+          </button>
+        </div>
+      );
+    }
+
+    // === HISTORY VIEW ===
+    function HistoryView({ categories, currentMonth, setCurrentMonth, availableMonths, expenses, onExpenseClick }) {
+      const [filterCat, setFilterCat] = useState(null);
+      const filtered = filterCat ? expenses.filter(e => e.categoryId === filterCat) : expenses;
+      const sorted = filtered.slice().sort((a, b) => b.date.localeCompare(a.date));
+      const grouped = {};
+      sorted.forEach(e => { if (!grouped[e.date]) grouped[e.date] = []; grouped[e.date].push(e); });
+      return (
+        <div>
+          <div className="bg-white border-b border-stone-200 sticky top-0 z-10">
+            <div className="px-5 pt-12 pb-4">
+              <MonthSelector currentMonth={currentMonth} setCurrentMonth={setCurrentMonth} availableMonths={availableMonths} />
+            </div>
+            <div className="px-5 pb-3 overflow-x-auto">
+              <div className="flex gap-2 min-w-min">
+                <button onClick={() => setFilterCat(null)} className={'px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap ' + (!filterCat ? 'bg-stone-900 text-white' : 'bg-stone-100 text-stone-700')}>Toutes</button>
+                {categories.map(c => (
+                  <button key={c.id} onClick={() => setFilterCat(c.id)} className={'px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap flex items-center gap-1 ' + (filterCat === c.id ? 'bg-stone-900 text-white' : 'bg-stone-100 text-stone-700')}>
+                    <span>{c.icon}</span><span>{c.name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="px-5 pt-4">
+            {sorted.length === 0 ? (
+              <div className="text-center pt-12"><div className="text-stone-400 text-sm">Aucune dépense {filterCat ? 'dans cette catégorie' : 'ce mois-ci'}.</div></div>
+            ) : (
+              Object.entries(grouped).map(([date, items]) => (
+                <div key={date} className="mb-4">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-2 px-1">{dateLabel(date)}</div>
+                  <div className="bg-white rounded-2xl shadow-sm border border-stone-100 overflow-hidden">
+                    {items.map((e, i) => {
+                      const cat = categories.find(c => c.id === e.categoryId);
+                      return (
+                        <button key={e.id} onClick={() => onExpenseClick(e)} className={'w-full px-4 py-3 flex items-center gap-3 text-left active:bg-stone-50 ' + (i < items.length - 1 ? 'border-b border-stone-100' : '')}>
+                          <div className="text-2xl flex-shrink-0">{cat?.icon || '💰'}</div>
+                          <div className="min-w-0 flex-1">
+                            <div className="font-medium text-stone-900 text-sm truncate">{e.description || cat?.name || 'Dépense'}</div>
+                            <div className="text-xs text-stone-500 mt-0.5 flex items-center gap-1">
+                              {cat?.name}
+                              {e.hasPhoto && <IconFileImage className="w-3 h-3" />}
+                            </div>
+                          </div>
+                          <div className="text-sm font-semibold text-stone-900">{formatEur(e.amount)}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // === SETTINGS ===
+    function SettingsView({ categories, onSave }) {
+      const [editing, setEditing] = useState(null);
+      const [draftTarget, setDraftTarget] = useState('');
+      const handleSave = async () => {
+        const n = parseFloat(draftTarget);
+        if (isNaN(n) || n < 0) return;
+        const newCats = categories.map(c => c.id === editing.id ? { ...c, target: n } : c);
+        await onSave(newCats);
+        setEditing(null);
+      };
+      const totalTarget = categories.reduce((a, c) => a + c.target, 0);
+      return (
+        <div>
+          <div className="bg-white border-b border-stone-200 sticky top-0 z-10">
+            <div className="px-5 pt-12 pb-4"><div className="text-lg font-semibold text-stone-900 tracking-tight">Paramètres</div></div>
+          </div>
+          <div className="px-5 pt-6">
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-3 px-1">Cibles mensuelles</h2>
+            <div className="bg-white rounded-2xl shadow-sm border border-stone-100 overflow-hidden">
+              {categories.map((c, i) => (
+                <button key={c.id} onClick={() => { setEditing(c); setDraftTarget(String(c.target)); }} className={'w-full px-4 py-3 flex items-center gap-3 text-left active:bg-stone-50 ' + (i < categories.length - 1 ? 'border-b border-stone-100' : '')}>
+                  <div className="text-2xl">{c.icon}</div>
+                  <div className="flex-1 font-medium text-stone-900 text-sm">{c.name}</div>
+                  <div className="text-sm text-stone-600">{formatEur(c.target)}</div>
+                  <IconEdit className="w-4 h-4 text-stone-400" />
+                </button>
+              ))}
+            </div>
+            <div className="mt-4 bg-stone-100 rounded-2xl p-4 flex items-center justify-between">
+              <div className="text-sm font-medium text-stone-700">Total cible mensuel</div>
+              <div className="text-base font-semibold text-stone-900">{formatEur(totalTarget)}</div>
+            </div>
+            <div className="mt-8 px-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-2">À propos</h3>
+              <p className="text-sm text-stone-600 leading-relaxed">Les données et photos sont stockées sur ton appareil (localStorage + IndexedDB). Rien n'est envoyé sur un serveur.</p>
+            </div>
+          </div>
+          {editing && (
+            <div className="fixed inset-0 bg-black/40 flex items-end z-50" onClick={() => setEditing(null)}>
+              <div className="bg-white w-full rounded-t-3xl p-6 pb-8" onClick={e => e.stopPropagation()}>
+                <div className="text-center text-stone-500 text-xs uppercase tracking-wider font-semibold mb-2">Cible mensuelle</div>
+                <div className="text-center text-xl font-semibold text-stone-900 mb-6 flex items-center justify-center gap-2"><span className="text-2xl">{editing.icon}</span><span>{editing.name}</span></div>
+                <input type="text" inputMode="decimal" value={draftTarget} onChange={e => setDraftTarget(e.target.value.replace(',', '.'))} className="w-full text-3xl font-semibold text-center bg-stone-100 rounded-2xl py-4 outline-none focus:bg-stone-200" autoFocus />
+                <div className="text-center text-stone-500 text-sm mt-2">€ par mois</div>
+                <div className="flex gap-3 mt-6">
+                  <button onClick={() => setEditing(null)} className="flex-1 py-3 rounded-2xl bg-stone-100 font-medium text-stone-700">Annuler</button>
+                  <button onClick={handleSave} className="flex-1 py-3 rounded-2xl bg-stone-900 font-medium text-white">Enregistrer</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // === EXPENSE FORM ===
+    function ExpenseForm({ categories, onClose, onSave, initial }) {
+      const [amount, setAmount] = useState(initial?.amount?.toString() || '');
+      const [categoryId, setCategoryId] = useState(initial?.categoryId || null);
+      const [date, setDate] = useState(initial?.date || new Date().toISOString().slice(0, 10));
+      const [description, setDescription] = useState(initial?.description || '');
+      const [photoData, setPhotoData] = useState(null);
+      const [photoPreview, setPhotoPreview] = useState(null);
+      const [saving, setSaving] = useState(false);
+      const [error, setError] = useState(null);
+      const fileInputRef = useRef(null);
+
+      const handlePhoto = async (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        try { const compressed = await compressImage(file); setPhotoData(compressed); setPhotoPreview(compressed); }
+        catch { setError("Impossible de lire l'image"); }
+      };
+      const handleSubmit = async () => {
+        const amt = parseFloat(amount.replace(',', '.'));
+        if (isNaN(amt) || amt <= 0) { setError('Montant invalide'); return; }
+        if (!categoryId) { setError('Choisis une catégorie'); return; }
+        setSaving(true);
+        try {
+          const expense = {
+            ...(initial?.id ? { id: initial.id } : {}),
+            amount: amt, categoryId, date, description: description.trim(),
+            hasPhoto: !!(photoData || initial?.hasPhoto),
+            createdAt: initial?.createdAt || new Date().toISOString(),
+          };
+          await onSave(expense, photoData);
+        } catch { setError("Erreur d'enregistrement"); setSaving(false); }
+      };
+
+      return (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-end" onClick={onClose}>
+          <div className="bg-stone-50 w-full rounded-t-3xl max-h-[92vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="sticky top-0 bg-stone-50 px-5 pt-3 pb-3 border-b border-stone-200 flex items-center">
+              <button onClick={onClose} className="text-stone-600 text-sm font-medium">Annuler</button>
+              <div className="flex-1 text-center font-semibold text-stone-900">{initial ? 'Modifier' : 'Nouvelle dépense'}</div>
+              <button onClick={handleSubmit} disabled={saving || !amount || !categoryId} className={'text-sm font-semibold ' + (saving || !amount || !categoryId ? 'text-stone-400' : 'text-stone-900')}>{saving ? '…' : 'OK'}</button>
+            </div>
+            <div className="px-5 pt-6 pb-12 space-y-5">
+              <div className="bg-white rounded-2xl px-5 py-6 shadow-sm border border-stone-100">
+                <div className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-2">Montant</div>
+                <div className="flex items-baseline gap-2">
+                  <input type="text" inputMode="decimal" placeholder="0" value={amount} onChange={e => { setAmount(e.target.value.replace(',', '.')); setError(null); }} className="text-4xl font-semibold tracking-tight bg-transparent outline-none flex-1 min-w-0" autoFocus />
+                  <span className="text-3xl text-stone-400 font-light">€</span>
+                </div>
+              </div>
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-2 px-1">Catégorie</div>
+                <div className="grid grid-cols-2 gap-2">
+                  {categories.map(c => (
+                    <button key={c.id} onClick={() => { setCategoryId(c.id); setError(null); }} className={'px-3 py-3 rounded-2xl border text-left flex items-center gap-2 ' + (categoryId === c.id ? 'bg-stone-900 text-white border-stone-900' : 'bg-white border-stone-200 text-stone-700')}>
+                      <span className="text-xl">{c.icon}</span><span className="text-xs font-medium truncate">{c.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="bg-white rounded-2xl px-4 py-3 shadow-sm border border-stone-100 flex items-center justify-between">
+                <span className="text-sm font-medium text-stone-700">Date</span>
+                <input type="date" value={date} onChange={e => setDate(e.target.value)} className="text-sm text-stone-900 bg-transparent outline-none text-right" />
+              </div>
+              <div className="bg-white rounded-2xl px-4 py-3 shadow-sm border border-stone-100">
+                <div className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-1">Description (facultatif)</div>
+                <input type="text" placeholder="Ex. Déjeuner Le Récamier" value={description} onChange={e => setDescription(e.target.value)} className="w-full text-sm bg-transparent outline-none" />
+              </div>
+              <div className="bg-white rounded-2xl p-4 shadow-sm border border-stone-100">
+                <div className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-3">Justificatif (facultatif)</div>
+                {photoPreview ? (
+                  <div className="relative">
+                    <img src={photoPreview} alt="Justificatif" className="w-full rounded-xl object-cover max-h-80" />
+                    <button onClick={() => { setPhotoData(null); setPhotoPreview(null); }} className="absolute top-2 right-2 bg-black/60 text-white rounded-full p-1.5"><IconX className="w-4 h-4" /></button>
+                  </div>
+                ) : (
+                  <React.Fragment>
+                    <input ref={fileInputRef} type="file" accept="image/*" capture="environment" onChange={handlePhoto} className="hidden" />
+                    <button onClick={() => fileInputRef.current?.click()} className="w-full py-4 border-2 border-dashed border-stone-200 rounded-xl text-stone-500 text-sm flex items-center justify-center gap-2">
+                      <IconCamera /> Prendre en photo / choisir
+                    </button>
+                  </React.Fragment>
+                )}
+              </div>
+              {error && <div className="bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 flex items-center gap-2 text-sm text-rose-700"><IconAlert className="w-4 h-4 flex-shrink-0" /><span>{error}</span></div>}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // === EXPENSE DETAIL ===
+    function ExpenseDetail({ expense, categories, onClose, onSave, onDelete }) {
+      const [photoUrl, setPhotoUrl] = useState(null);
+      const [editing, setEditing] = useState(false);
+      const [confirmDelete, setConfirmDelete] = useState(false);
+      const cat = categories.find(c => c.id === expense.categoryId);
+      useEffect(() => { if (expense.hasPhoto) getPhoto(expense.id).then(setPhotoUrl); }, [expense]);
+      if (editing) {
+        return <ExpenseForm categories={categories} initial={expense} onClose={() => setEditing(false)} onSave={async (e, p) => { await onSave(e, p); setEditing(false); }} />;
+      }
+      return (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-end" onClick={onClose}>
+          <div className="bg-stone-50 w-full rounded-t-3xl max-h-[92vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="sticky top-0 bg-stone-50 px-5 pt-3 pb-3 border-b border-stone-200 flex items-center">
+              <button onClick={onClose} className="text-stone-600 text-sm font-medium">Fermer</button>
+              <div className="flex-1" />
+              <button onClick={() => setEditing(true)} className="text-stone-900 text-sm font-semibold">Modifier</button>
+            </div>
+            <div className="px-5 pt-6 pb-12">
+              <div className="text-center">
+                <div className="text-5xl mb-3">{cat?.icon || '💰'}</div>
+                <div className="text-4xl font-semibold tracking-tight text-stone-900">{formatEurFull(expense.amount)}</div>
+                <div className="text-stone-500 text-sm mt-1">{cat?.name}</div>
+              </div>
+              <div className="mt-8 bg-white rounded-2xl shadow-sm border border-stone-100 divide-y divide-stone-100">
+                <div className="px-4 py-3 flex justify-between text-sm">
+                  <span className="text-stone-500">Date</span>
+                  <span className="text-stone-900 font-medium">{new Date(expense.date).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' })}</span>
+                </div>
+                {expense.description && (
+                  <div className="px-4 py-3 flex justify-between text-sm gap-3">
+                    <span className="text-stone-500 flex-shrink-0">Description</span>
+                    <span className="text-stone-900 font-medium text-right">{expense.description}</span>
+                  </div>
+                )}
+              </div>
+              {expense.hasPhoto && (
+                <div className="mt-6">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-2 px-1">Justificatif</div>
+                  {photoUrl ? (
+                    <a href={photoUrl} target="_blank" rel="noopener noreferrer">
+                      <img src={photoUrl} alt="Justificatif" className="w-full rounded-2xl object-cover" />
+                    </a>
+                  ) : (
+                    <div className="bg-white rounded-2xl h-40 flex items-center justify-center text-stone-400 text-sm">Chargement…</div>
+                  )}
+                </div>
+              )}
+              <button onClick={() => setConfirmDelete(true)} className="mt-8 w-full py-3 bg-white border border-rose-200 text-rose-600 rounded-2xl font-medium text-sm flex items-center justify-center gap-2">
+                <IconTrash className="w-4 h-4" /> Supprimer cette dépense
+              </button>
+            </div>
+            {confirmDelete && (
+              <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-6" onClick={() => setConfirmDelete(false)}>
+                <div className="bg-white rounded-2xl p-6 max-w-sm w-full" onClick={e => e.stopPropagation()}>
+                  <div className="text-center font-semibold text-stone-900">Supprimer cette dépense ?</div>
+                  <div className="text-center text-sm text-stone-500 mt-1">Cette action est irréversible.</div>
+                  <div className="flex gap-3 mt-5">
+                    <button onClick={() => setConfirmDelete(false)} className="flex-1 py-2.5 rounded-xl bg-stone-100 font-medium text-stone-700 text-sm">Annuler</button>
+                    <button onClick={() => onDelete(expense)} className="flex-1 py-2.5 rounded-xl bg-rose-600 font-medium text-white text-sm">Supprimer</button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // === BOTTOM NAV ===
+    function BottomNav({ view, setView, onAdd }) {
+      return (
+        <div className="fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur border-t border-stone-200 px-3 pt-2 pb-6 z-40" style={{ paddingBottom: 'max(1.5rem, env(safe-area-inset-bottom))' }}>
+          <div className="flex items-center justify-around max-w-md mx-auto">
+            <NavButton icon={<IconChart />} label="Aperçu" active={view === 'dashboard'} onClick={() => setView('dashboard')} />
+            <NavButton icon={<IconHistory />} label="Historique" active={view === 'history'} onClick={() => setView('history')} />
+            <button onClick={onAdd} className="bg-stone-900 text-white rounded-full p-4 -mt-6 shadow-lg active:scale-95 transition-transform"><IconPlus className="w-6 h-6" /></button>
+            <NavButton icon={<IconSettings />} label="Réglages" active={view === 'settings'} onClick={() => setView('settings')} />
+            <div className="w-12" />
+          </div>
+        </div>
+      );
+    }
+    function NavButton({ icon, label, active, onClick }) {
+      return (
+        <button onClick={onClick} className={'flex flex-col items-center gap-0.5 py-1 px-2 ' + (active ? 'text-stone-900' : 'text-stone-400')}>
+          {icon}
+          <span className="text-[10px] font-medium">{label}</span>
+        </button>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
